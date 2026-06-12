@@ -1,0 +1,104 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+
+env:
+  S3_BUCKET: secuprobe-agent-releases
+  AWS_REGION: eu-west-3
+
+jobs:
+  build:
+    name: Cross-compile binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: secuprobe-agent-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: secuprobe-agent-linux-arm64
+          - goos: windows
+            goarch: amd64
+            output: secuprobe-agent-windows-amd64.exe
+          - goos: darwin
+            goarch: amd64
+            output: secuprobe-agent-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: secuprobe-agent-darwin-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
+            -o dist/${{ matrix.output }} ./cmd/agent
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
+  release:
+    name: Upload to S3
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload binaries to S3 (versioned)
+        run: |
+          VERSION="${{ github.ref_name }}"
+          for f in dist/*; do
+            aws s3 cp "$f" "s3://${{ env.S3_BUCKET }}/${VERSION}/$(basename $f)" \
+              --acl public-read \
+              --cache-control "max-age=31536000"
+          done
+
+      - name: Upload binaries to S3 (latest)
+        run: |
+          for f in dist/*; do
+            aws s3 cp "$f" "s3://${{ env.S3_BUCKET }}/latest/$(basename $f)" \
+              --acl public-read \
+              --cache-control "no-cache"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*
+          generate_release_notes: true
