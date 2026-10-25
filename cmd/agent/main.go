@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Auxilh/secuprobe-agent/internal/reporter"
 	"github.com/Auxilh/secuprobe-agent/internal/scanner"
+	"github.com/Auxilh/secuprobe-agent/internal/targets"
 )
 
 // Version is injected at build time via ldflags.
@@ -16,88 +18,94 @@ var Version = "dev"
 func main() {
 	agentToken := getEnv("AGENT_TOKEN", "")
 	reportURL := getEnv("REPORT_URL", "https://secuprobe.io/api/agent/report")
-	targetHost := getEnv("SCAN_TARGET", "127.0.0.1")
-	timeout := 2 * time.Second
+	targetSpec := firstNonEmpty(os.Getenv("SCAN_TARGETS"), os.Getenv("SCAN_TARGET"))
+	timeout := envDuration("SCAN_TIMEOUT_MS", 2*time.Second)
+	concurrency := envInt("SCAN_CONCURRENCY", 100)
+	// Run as a daemon by default: scan every hour. SCAN_INTERVAL_SECONDS=0 runs once and exits.
+	interval := time.Duration(envIntAllowZero("SCAN_INTERVAL_SECONDS", 3600)) * time.Second
 
 	if agentToken == "" {
 		fmt.Fprintln(os.Stderr, "Error: AGENT_TOKEN environment variable is required")
 		os.Exit(1)
 	}
-
-	fmt.Printf("SecuProbe Agent %s\n", Version)
-	fmt.Printf("Scanning host: %s\n", targetHost)
-	fmt.Printf("Report URL: %s\n", reportURL)
-	fmt.Println("---")
-
-	// Port scan
-	fmt.Printf("Scanning %d ports...\n", len(scanner.TOP_1000_PORTS))
-	openPorts := scanner.ScanPorts(targetHost, scanner.TOP_1000_PORTS, timeout, 100)
-	fmt.Printf("Found %d open port(s)\n", len(openPorts))
-
-	// CVE lookup for detected services
-	var cves []scanner.CVEMatch
-	serviceKeywords := extractServiceKeywords(openPorts)
-	for _, kw := range serviceKeywords {
-		fmt.Printf("Looking up CVEs for: %s\n", kw)
-		matches, err := scanner.LookupCVEsForService(kw, 5)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "CVE lookup error for %s: %v\n", kw, err)
-			continue
-		}
-		cves = append(cves, matches...)
-	}
-	fmt.Printf("Found %d CVE(s)\n", len(cves))
-
-	// Build hostname
-	hostname := targetHost
-
-	// Send report
-	fmt.Println("Sending report to SecuProbe...")
-	report := reporter.Report{
-		Hostname: hostname,
-		Results: reporter.ReportResults{
-			OpenPorts: openPorts,
-			CVEs:      cves,
-		},
-	}
-
-	scanID, err := reporter.Send(reportURL, agentToken, report)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending report: %v\n", err)
+	if !strings.HasPrefix(agentToken, "spagent_") {
+		fmt.Fprintln(os.Stderr, "Error: AGENT_TOKEN is malformed (expected an spagent_ token)")
 		os.Exit(1)
 	}
 
-	fmt.Printf("Report submitted successfully. Scan ID: %s\n", scanID)
+	// No target configured → scan this host as seen from the network.
+	if strings.TrimSpace(targetSpec) == "" {
+		targetSpec = targets.LocalDefault()
+	}
+
+	hosts, err := targets.Parse(targetSpec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("SecuProbe Agent %s\n", Version)
+	fmt.Printf("Report URL: %s\n", reportURL)
+	fmt.Printf("Targets: %d host(s)\n", len(hosts))
+	if interval > 0 {
+		fmt.Printf("Interval: every %s\n", interval)
+	} else {
+		fmt.Println("Interval: single run")
+	}
+	fmt.Println("---")
+
+	for {
+		failures := scanCycle(reportURL, agentToken, hosts, timeout, concurrency)
+		if interval <= 0 {
+			if failures > 0 {
+				os.Exit(1)
+			}
+			return
+		}
+		fmt.Printf("Next scan in %s\n", interval)
+		time.Sleep(interval)
+	}
 }
 
-// extractServiceKeywords maps well-known ports to service keywords for CVE lookup.
-func extractServiceKeywords(ports []scanner.OpenPort) []string {
-	portToService := map[int]string{
-		21:    "OpenSSH FTP",
-		22:    "OpenSSH",
-		80:    "Apache nginx",
-		443:   "OpenSSL",
-		3306:  "MySQL",
-		5432:  "PostgreSQL",
-		6379:  "Redis",
-		27017: "MongoDB",
-		8080:  "Apache Tomcat",
-		9200:  "Elasticsearch",
-	}
+// scanCycle scans every host once and reports each, returning the number of
+// failed reports. Every reachable host is reported, even with no open port, so
+// the dashboard shows it was scanned.
+func scanCycle(reportURL, token string, hosts []string, timeout time.Duration, concurrency int) int {
+	var failures int
+	for i, host := range hosts {
+		fmt.Printf("[%d/%d] Scanning %s (%d ports)...\n", i+1, len(hosts), host, len(scanner.TOP_1000_PORTS))
+		openPorts := scanner.ScanPorts(host, scanner.TOP_1000_PORTS, timeout, concurrency)
+		fmt.Printf("        %d open port(s)\n", len(openPorts))
 
-	seen := map[string]bool{}
-	var keywords []string
-	for _, p := range ports {
-		if kw, ok := portToService[p.Port]; ok {
-			for _, k := range strings.Fields(kw) {
-				if !seen[k] {
-					seen[k] = true
-					keywords = append(keywords, k)
-				}
-			}
+		if err := send(reportURL, token, host, openPorts); err != nil {
+			fmt.Fprintf(os.Stderr, "        report error: %v\n", err)
+			failures++
+			continue
 		}
+		fmt.Printf("        reported\n")
 	}
-	return keywords
+	fmt.Println("---")
+	if failures > 0 {
+		fmt.Fprintf(os.Stderr, "Cycle done with %d/%d host report(s) failing\n", failures, len(hosts))
+	} else {
+		fmt.Printf("Cycle done. %d host(s) reported.\n", len(hosts))
+	}
+	return failures
+}
+
+// send builds and posts the report for a single host. CVE correlation from the
+// detected services is done server-side (the backend owns the NVD key and cache),
+// so the agent stays small and needs no outbound internet beyond the report URL.
+func send(reportURL, token, host string, openPorts []scanner.OpenPort) error {
+	report := reporter.Report{
+		Hostname: host,
+		Results: reporter.ReportResults{
+			OpenPorts: openPorts,
+			Services:  scanner.IdentifyServices(openPorts),
+		},
+	}
+	_, err := reporter.Send(reportURL, token, report)
+	return err
 }
 
 func getEnv(key, defaultVal string) string {
@@ -105,4 +113,41 @@ func getEnv(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// envIntAllowZero parses a non-negative integer, honoring an explicit 0.
+func envIntAllowZero(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return def
 }

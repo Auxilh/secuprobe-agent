@@ -17,10 +17,11 @@ type Report struct {
 	Results  ReportResults   `json:"results"`
 }
 
-// ReportResults contains the scan findings.
+// ReportResults contains the scan findings. CVE correlation is done server-side
+// from the detected services, so the agent does not send a cves array.
 type ReportResults struct {
-	OpenPorts []scanner.OpenPort  `json:"openPorts"`
-	CVEs      []scanner.CVEMatch  `json:"cves"`
+	OpenPorts []scanner.OpenPort   `json:"openPorts"`
+	Services  []scanner.ServiceInfo `json:"services"`
 }
 
 // Send posts the report to the SecuProbe backend.

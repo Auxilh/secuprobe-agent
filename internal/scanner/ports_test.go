@@ -17,12 +17,19 @@ func startMockTCPServer(t *testing.T, banner string) int {
 	t.Cleanup(func() { ln.Close() })
 
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Write([]byte(banner))
+			// Keep the connection open until the client reads, like a real service:
+			// block on a read so the banner is delivered before we close.
+			buf := make([]byte, 64)
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			_, _ = conn.Read(buf)
+			conn.Close()
 		}
-		defer conn.Close()
-		conn.Write([]byte(banner))
 	}()
 
 	return ln.Addr().(*net.TCPAddr).Port

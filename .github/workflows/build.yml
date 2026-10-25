@@ -10,9 +10,8 @@ on:
         description: 'Version tag (e.g. v1.0.0)'
         required: true
 
-env:
-  S3_BUCKET: secuprobe-agent-releases
-  AWS_REGION: eu-west-3
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -46,13 +45,17 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Test
+        run: go test ./...
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          go build -ldflags="-s -w -X main.Version=${VERSION}" \
             -o dist/${{ matrix.output }} ./cmd/agent
 
       - name: Upload artifact
@@ -62,9 +65,10 @@ jobs:
           path: dist/${{ matrix.output }}
 
   release:
-    name: Upload to S3
+    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -72,33 +76,8 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload binaries to S3 (versioned)
-        run: |
-          VERSION="${{ github.ref_name }}"
-          for f in dist/*; do
-            aws s3 cp "$f" "s3://${{ env.S3_BUCKET }}/${VERSION}/$(basename $f)" \
-              --acl public-read \
-              --cache-control "max-age=31536000"
-          done
-
-      - name: Upload binaries to S3 (latest)
-        run: |
-          for f in dist/*; do
-            aws s3 cp "$f" "s3://${{ env.S3_BUCKET }}/latest/$(basename $f)" \
-              --acl public-read \
-              --cache-control "no-cache"
-          done
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*
           generate_release_notes: true

@@ -1,9 +1,9 @@
 package scanner
 
 import (
-	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -48,7 +48,7 @@ func ScanPorts(host string, ports []int, timeout time.Duration, concurrency int)
 		go func() {
 			defer wg.Done()
 			for port := range jobs {
-				address := fmt.Sprintf("%s:%d", host, port)
+				address := net.JoinHostPort(host, strconv.Itoa(port))
 				conn, err := net.DialTimeout("tcp", address, timeout)
 				if err != nil {
 					results <- result{port: port, open: false}
