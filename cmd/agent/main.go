@@ -73,8 +73,8 @@ func main() {
 func scanCycle(reportURL, token string, hosts []string, timeout time.Duration, concurrency int) int {
 	var failures int
 	for i, host := range hosts {
-		fmt.Printf("[%d/%d] Scanning %s (%d ports)...\n", i+1, len(hosts), host, len(scanner.TOP_1000_PORTS))
-		states := scanner.ScanPortStates(host, scanner.TOP_1000_PORTS, timeout, concurrency)
+		fmt.Printf("[%d/%d] Scanning %s (%d ports)...\n", i+1, len(hosts), host, len(scanner.CommonPorts))
+		states := scanner.ScanPortStates(host, scanner.CommonPorts, timeout, concurrency)
 		openPorts := scanner.OpenPorts(states)
 		fmt.Printf("        %d open port(s)\n", len(openPorts))
 
@@ -104,6 +104,7 @@ func send(reportURL, token, host string, openPorts []scanner.OpenPort, states []
 			OpenPorts:  openPorts,
 			Services:   scanner.IdentifyServices(openPorts),
 			PortStates: states,
+			Coverage:   reporter.Summarize(states),
 		},
 	}
 	_, err := reporter.Send(reportURL, token, report)

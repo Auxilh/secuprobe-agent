@@ -11,8 +11,10 @@ import (
 	"time"
 )
 
-// Top 1000 most common ports (subset — key services)
-var TOP_1000_PORTS = []int{
+// CommonPorts is the list of TCP ports the agent scans: a selection of common
+// service ports (len(CommonPorts) entries, not a "top 1000"). The report states
+// its size so the dashboard never claims a wider coverage (audit F69).
+var CommonPorts = []int{
 	21, 22, 23, 25, 53, 80, 81, 110, 111, 119, 135, 139, 143, 179, 194,
 	443, 445, 465, 500, 513, 514, 515, 587, 631, 993, 995, 1080, 1194,
 	1433, 1521, 1723, 2049, 2082, 2083, 2086, 2087, 2095, 2096,

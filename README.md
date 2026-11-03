@@ -43,7 +43,7 @@ The binary is configured entirely through the environment (the installer writes
 
 ## What it does
 
-1. TCP-connect scan of ~1000 common ports on each target, with banner grab.
+1. TCP-connect scan of a fixed list of common service ports (the report states its size), with banner grab. A service is named from its banner, otherwise only as the usual service of the port; CVE matches are candidates to verify.
 2. Best-effort service identification (product + version) from banners.
 3. Posts `{ hostname, openPorts, services }` to `REPORT_URL`.
 

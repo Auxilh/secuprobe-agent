@@ -25,6 +25,38 @@ type ReportResults struct {
 	// PortStates lists every scanned port with its state (open, closed,
 	// filtered, unreachable). Older servers ignore it.
 	PortStates []scanner.PortState `json:"portStates,omitempty"`
+	// Coverage counts the scanned ports by state, so connection failures
+	// (filtered, unreachable) are reported instead of silently dropped (F69).
+	// Older servers ignore it.
+	Coverage *Coverage `json:"coverage,omitempty"`
+}
+
+// Coverage summarizes what the scan could actually observe.
+type Coverage struct {
+	PortList    string `json:"portList"`
+	Scanned     int    `json:"scanned"`
+	Open        int    `json:"open"`
+	Closed      int    `json:"closed"`
+	Filtered    int    `json:"filtered"`
+	Unreachable int    `json:"unreachable"`
+}
+
+// Summarize counts port states.
+func Summarize(states []scanner.PortState) *Coverage {
+	c := &Coverage{PortList: fmt.Sprintf("common-%d", len(scanner.CommonPorts)), Scanned: len(states)}
+	for _, s := range states {
+		switch s.State {
+		case scanner.StateOpen:
+			c.Open++
+		case scanner.StateClosed:
+			c.Closed++
+		case scanner.StateFiltered:
+			c.Filtered++
+		default:
+			c.Unreachable++
+		}
+	}
+	return c
 }
 
 // Send posts the report to the SecuProbe backend.
