@@ -13,15 +13,18 @@ import (
 
 // Report is the payload sent to the SecuProbe backend.
 type Report struct {
-	Hostname string          `json:"hostname"`
-	Results  ReportResults   `json:"results"`
+	Hostname string        `json:"hostname"`
+	Results  ReportResults `json:"results"`
 }
 
 // ReportResults contains the scan findings. CVE correlation is done server-side
 // from the detected services, so the agent does not send a cves array.
 type ReportResults struct {
-	OpenPorts []scanner.OpenPort   `json:"openPorts"`
+	OpenPorts []scanner.OpenPort    `json:"openPorts"`
 	Services  []scanner.ServiceInfo `json:"services"`
+	// PortStates lists every scanned port with its state (open, closed,
+	// filtered, unreachable). Older servers ignore it.
+	PortStates []scanner.PortState `json:"portStates,omitempty"`
 }
 
 // Send posts the report to the SecuProbe backend.

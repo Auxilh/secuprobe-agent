@@ -74,10 +74,11 @@ func scanCycle(reportURL, token string, hosts []string, timeout time.Duration, c
 	var failures int
 	for i, host := range hosts {
 		fmt.Printf("[%d/%d] Scanning %s (%d ports)...\n", i+1, len(hosts), host, len(scanner.TOP_1000_PORTS))
-		openPorts := scanner.ScanPorts(host, scanner.TOP_1000_PORTS, timeout, concurrency)
+		states := scanner.ScanPortStates(host, scanner.TOP_1000_PORTS, timeout, concurrency)
+		openPorts := scanner.OpenPorts(states)
 		fmt.Printf("        %d open port(s)\n", len(openPorts))
 
-		if err := send(reportURL, token, host, openPorts); err != nil {
+		if err := send(reportURL, token, host, openPorts, states); err != nil {
 			fmt.Fprintf(os.Stderr, "        report error: %v\n", err)
 			failures++
 			continue
@@ -96,12 +97,13 @@ func scanCycle(reportURL, token string, hosts []string, timeout time.Duration, c
 // send builds and posts the report for a single host. CVE correlation from the
 // detected services is done server-side (the backend owns the NVD key and cache),
 // so the agent stays small and needs no outbound internet beyond the report URL.
-func send(reportURL, token, host string, openPorts []scanner.OpenPort) error {
+func send(reportURL, token, host string, openPorts []scanner.OpenPort, states []scanner.PortState) error {
 	report := reporter.Report{
 		Hostname: host,
 		Results: reporter.ReportResults{
-			OpenPorts: openPorts,
-			Services:  scanner.IdentifyServices(openPorts),
+			OpenPorts:  openPorts,
+			Services:   scanner.IdentifyServices(openPorts),
+			PortStates: states,
 		},
 	}
 	_, err := reporter.Send(reportURL, token, report)

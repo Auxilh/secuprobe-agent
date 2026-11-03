@@ -1,10 +1,13 @@
 package scanner
 
 import (
+	"errors"
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -26,21 +29,45 @@ type OpenPort struct {
 	Banner   string `json:"banner,omitempty"`
 }
 
-// ScanPorts performs a concurrent TCP port scan on the given host.
-// Returns the list of open ports with optional banner.
-func ScanPorts(host string, ports []int, timeout time.Duration, concurrency int) []OpenPort {
+// Port states (audit F39). Only "closed" (explicit refusal) proves that a port
+// previously reported open has been closed; "filtered" (no answer before the
+// timeout) and "unreachable" (network or local error) prove nothing.
+const (
+	StateOpen        = "open"
+	StateClosed      = "closed"
+	StateFiltered    = "filtered"
+	StateUnreachable = "unreachable"
+)
+
+// PortState is the outcome of a TCP connect on one port.
+type PortState struct {
+	Port   int    `json:"port"`
+	State  string `json:"state"`
+	Banner string `json:"banner,omitempty"`
+}
+
+// classifyDialError maps a dial error to a port state.
+func classifyDialError(err error) string {
+	// syscall.ECONNREFUSED on Unix; Windows reports WSAECONNREFUSED ("actively refused").
+	if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(strings.ToLower(err.Error()), "refused") {
+		return StateClosed
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return StateFiltered
+	}
+	return StateUnreachable
+}
+
+// ScanPortStates performs a concurrent TCP connect on every port and returns
+// the state of each one, sorted by port.
+func ScanPortStates(host string, ports []int, timeout time.Duration, concurrency int) []PortState {
 	if concurrency <= 0 {
 		concurrency = 100
 	}
 
-	type result struct {
-		port   int
-		open   bool
-		banner string
-	}
-
 	jobs := make(chan int, len(ports))
-	results := make(chan result, len(ports))
+	results := make(chan PortState, len(ports))
 
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
@@ -51,13 +78,12 @@ func ScanPorts(host string, ports []int, timeout time.Duration, concurrency int)
 				address := net.JoinHostPort(host, strconv.Itoa(port))
 				conn, err := net.DialTimeout("tcp", address, timeout)
 				if err != nil {
-					results <- result{port: port, open: false}
+					results <- PortState{Port: port, State: classifyDialError(err)}
 					continue
 				}
-				// Grab banner
 				banner := grabBanner(conn, timeout)
 				conn.Close()
-				results <- result{port: port, open: true, banner: banner}
+				results <- PortState{Port: port, State: StateOpen, Banner: banner}
 			}
 		}()
 	}
@@ -72,19 +98,30 @@ func ScanPorts(host string, ports []int, timeout time.Duration, concurrency int)
 		close(results)
 	}()
 
-	var open []OpenPort
+	var states []PortState
 	for r := range results {
-		if r.open {
-			open = append(open, OpenPort{
-				Port:     r.port,
-				Protocol: "tcp",
-				Banner:   r.banner,
-			})
+		states = append(states, r)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].Port < states[j].Port })
+	return states
+}
+
+// OpenPorts keeps the open ports of a state list (report format accepted by
+// every server version).
+func OpenPorts(states []PortState) []OpenPort {
+	var open []OpenPort
+	for _, s := range states {
+		if s.State == StateOpen {
+			open = append(open, OpenPort{Port: s.Port, Protocol: "tcp", Banner: s.Banner})
 		}
 	}
-
-	sort.Slice(open, func(i, j int) bool { return open[i].Port < open[j].Port })
 	return open
+}
+
+// ScanPorts performs a concurrent TCP port scan on the given host.
+// Returns the list of open ports with optional banner.
+func ScanPorts(host string, ports []int, timeout time.Duration, concurrency int) []OpenPort {
+	return OpenPorts(ScanPortStates(host, ports, timeout, concurrency))
 }
 
 // grabBanner sends CRLF and reads the first 256 bytes of the response.

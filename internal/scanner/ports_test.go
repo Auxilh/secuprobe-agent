@@ -89,3 +89,45 @@ func TestScanPorts_SortsResults(t *testing.T) {
 	}
 }
 
+// Audit F39: a closed port (RST) and an open port are distinguishable.
+func TestScanPortStates_DistinguishesClosedFromOpen(t *testing.T) {
+	port := startMockTCPServer(t, "SSH-2.0-OpenSSH_8.9\r\n")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // nothing listens any more: the OS answers RST
+
+	states := ScanPortStates("127.0.0.1", []int{port, closedPort}, 2*time.Second, 10)
+	if len(states) != 2 {
+		t.Fatalf("expected 2 states, got %d", len(states))
+	}
+	byPort := map[int]string{}
+	for _, s := range states {
+		byPort[s.Port] = s.State
+	}
+	if byPort[port] != StateOpen {
+		t.Errorf("expected open, got %q", byPort[port])
+	}
+	if byPort[closedPort] != StateClosed {
+		t.Errorf("expected closed, got %q", byPort[closedPort])
+	}
+}
+
+// Audit F39: a timeout is "filtered", any other error "unreachable", never "closed".
+func TestClassifyDialError_TimeoutIsFiltered(t *testing.T) {
+	err := &net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{}}
+	if got := classifyDialError(err); got != StateFiltered {
+		t.Errorf("expected filtered, got %q", got)
+	}
+	if got := classifyDialError(fmt.Errorf("no route to host")); got != StateUnreachable {
+		t.Errorf("expected unreachable, got %q", got)
+	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
